@@ -4,89 +4,63 @@ use arcium_client::idl::arcium::types::CallbackAccount;
 use arcium_client::idl::arcium::types::{CircuitSource, OffChainCircuitSource};
 use arcium_macros::circuit_hash;
 
-const COMP_DEF_OFFSET_CAST_VOTE: u32 = comp_def_offset("cast_vote");
+const COMP_DEF_OFFSET_CHECK_ACCESS: u32 = comp_def_offset("check_access");
 
-declare_id!("A6aMv9XdGov532ahzgz8MgUMyPeW1cXCp7Ln8w5VmFvw");
+declare_id!("64DG39st7qGu8gGQtvQAkFAkgEFnzHa7GQiQRLUq1CyC");
 
 #[arcium_program]
-pub mod shadow_vote {
+pub mod cipher_gate {
     use super::*;
 
     pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
         let state = &mut ctx.accounts.program_state;
         state.authority = ctx.accounts.authority.key();
-        state.total_proposals = 0;
+        state.total_checks = 0;
         Ok(())
     }
 
-    pub fn create_proposal(
-        ctx: Context<CreateProposal>,
-        title: String,
-        description: String,
-        num_options: u8,
-        option_labels: Vec<String>,
-        voting_ends_at: i64,
-    ) -> Result<()> {
-        let proposal = &mut ctx.accounts.proposal;
-        proposal.creator = ctx.accounts.authority.key();
-        proposal.title = title;
-        proposal.description = description;
-        proposal.num_options = num_options;
-        let mut labels = [String::new(), String::new(), String::new(), String::new(), String::new(), String::new(), String::new(), String::new()];
-        for (i, l) in option_labels.iter().enumerate() {
-            if i < 8 { labels[i] = l.clone(); }
-        }
-        proposal.option_labels = labels;
-        proposal.voting_ends_at = voting_ends_at;
-        proposal.finalized = false;
-        proposal.results = [0u64; 8];
-        proposal.total_votes = 0;
-        let state = &mut ctx.accounts.program_state;
-        proposal.proposal_id = state.total_proposals;
-        state.total_proposals += 1;
-        Ok(())
-    }
-
-    pub fn init_cast_vote_comp_def(ctx: Context<InitCastVoteCompDef>) -> Result<()> {
+    pub fn init_check_access_comp_def(ctx: Context<InitCheckAccessCompDef>) -> Result<()> {
         init_comp_def(
             ctx.accounts,
             Some(CircuitSource::OffChain(OffChainCircuitSource {
-                source: "https://raw.githubusercontent.com/tilakkumar56/shadow-vote/main/build/cast_vote.arcis".to_string(),
-                hash: circuit_hash!("cast_vote"),
+                source: "https://raw.githubusercontent.com/tilakkumar56/cipher-gate/main/build/check_access.arcis".to_string(),
+                hash: circuit_hash!("check_access"),
             })),
             None,
         )?;
         Ok(())
     }
 
-    pub fn cast_vote(
-        ctx: Context<CastVote>,
+    pub fn check_access(
+        ctx: Context<CheckAccess>,
         computation_offset: u64,
-        ct_option_idx: [u8; 32],
-        ct_weight: [u8; 32],
-        ct_num_options: [u8; 32],
+        ct_requester_id: [u8; 32],
+        ct_resource_id: [u8; 32],
+        ct_allowed_user: [u8; 32],
+        ct_expiry_time: [u8; 32],
+        ct_current_time: [u8; 32],
         pub_key: [u8; 32],
         nonce: u128,
     ) -> Result<()> {
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
-
         let args = ArgBuilder::new()
             .x25519_pubkey(pub_key)
             .plaintext_u128(nonce)
-            .encrypted_u8(ct_option_idx)
-            .encrypted_u128(ct_weight)
-            .encrypted_u8(ct_num_options)
+            .encrypted_u128(ct_requester_id)
+            .encrypted_u128(ct_resource_id)
+            .encrypted_u128(ct_allowed_user)
+            .encrypted_u128(ct_expiry_time)
+            .encrypted_u128(ct_current_time)
             .build();
-
-        let vote_record_key = ctx.accounts.vote_record.key();
+        let access_log_key = ctx.accounts.access_log.key();
         queue_computation(
             ctx.accounts,
             computation_offset,
             args,
-            vec![CastVoteCallback::callback_ix(
+            vec![CheckAccessCallback::callback_ix(
                 computation_offset,
                 &ctx.accounts.mxe_account,
-                &[CallbackAccount { pubkey: vote_record_key, is_writable: true }],
+                &[CallbackAccount { pubkey: access_log_key, is_writable: true }],
             )?],
             1,
             0,
@@ -94,21 +68,21 @@ pub mod shadow_vote {
         Ok(())
     }
 
-    #[arcium_callback(encrypted_ix = "cast_vote")]
-    pub fn cast_vote_callback(
-        ctx: Context<CastVoteCallback>,
-        output: SignedComputationOutputs<CastVoteOutput>,
+    #[arcium_callback(encrypted_ix = "check_access")]
+    pub fn check_access_callback(
+        ctx: Context<CheckAccessCallback>,
+        output: SignedComputationOutputs<CheckAccessOutput>,
     ) -> Result<()> {
         let _o = match output.verify_output(
             &ctx.accounts.cluster_account,
             &ctx.accounts.computation_account,
         ) {
-            Ok(CastVoteOutput { field_0 }) => field_0,
+            Ok(CheckAccessOutput { field_0 }) => field_0,
             Err(_) => return Err(ErrorCode::AbortedComputation.into()),
         };
-        let record = &mut ctx.accounts.vote_record;
-        record.voted = true;
-        emit!(VoteEvent { voter: record.voter });
+        let log = &mut ctx.accounts.access_log;
+        log.completed = true;
+        emit!(AccessEvent { log_id: log.log_id });
         Ok(())
     }
 }
@@ -122,20 +96,9 @@ pub struct Initialize<'info> {
     pub system_program: Program<'info, System>,
 }
 
+#[init_computation_definition_accounts("check_access", payer)]
 #[derive(Accounts)]
-pub struct CreateProposal<'info> {
-    #[account(mut)]
-    pub authority: Signer<'info>,
-    #[account(init, payer = authority, space = 8 + Proposal::INIT_SPACE, seeds = [b"proposal", authority.key().as_ref(), &program_state.total_proposals.to_le_bytes()], bump)]
-    pub proposal: Account<'info, Proposal>,
-    #[account(mut, seeds = [b"program_state"], bump)]
-    pub program_state: Account<'info, ProgramState>,
-    pub system_program: Program<'info, System>,
-}
-
-#[init_computation_definition_accounts("cast_vote", payer)]
-#[derive(Accounts)]
-pub struct InitCastVoteCompDef<'info> {
+pub struct InitCheckAccessCompDef<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     #[account(mut, address = derive_mxe_pda!())]
@@ -153,10 +116,10 @@ pub struct InitCastVoteCompDef<'info> {
     pub system_program: Program<'info, System>,
 }
 
-#[queue_computation_accounts("cast_vote", payer)]
+#[queue_computation_accounts("check_access", payer)]
 #[derive(Accounts)]
 #[instruction(computation_offset: u64)]
-pub struct CastVote<'info> {
+pub struct CheckAccess<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     #[account(init_if_needed, space = 9, payer = payer, seeds = [&SIGN_PDA_SEED], bump, address = derive_sign_pda!())]
@@ -172,7 +135,7 @@ pub struct CastVote<'info> {
     #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account, ErrorCode::ClusterNotSet))]
     /// CHECK: computation_account
     pub computation_account: UncheckedAccount<'info>,
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_CAST_VOTE))]
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_CHECK_ACCESS))]
     pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
     #[account(mut, address = derive_cluster_pda!(mxe_account, ErrorCode::ClusterNotSet))]
     pub cluster_account: Account<'info, Cluster>,
@@ -180,17 +143,17 @@ pub struct CastVote<'info> {
     pub pool_account: Account<'info, FeePool>,
     #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
     pub clock_account: Account<'info, ClockAccount>,
-    #[account(init, payer = payer, space = 8 + VoteRecord::INIT_SPACE, seeds = [b"vote_record", computation_offset.to_le_bytes().as_ref()], bump)]
-    pub vote_record: Account<'info, VoteRecord>,
+    #[account(init, payer = payer, space = 8 + AccessLog::INIT_SPACE, seeds = [b"access_log", computation_offset.to_le_bytes().as_ref()], bump)]
+    pub access_log: Account<'info, AccessLog>,
     pub system_program: Program<'info, System>,
     pub arcium_program: Program<'info, Arcium>,
 }
 
-#[callback_accounts("cast_vote")]
+#[callback_accounts("check_access")]
 #[derive(Accounts)]
-pub struct CastVoteCallback<'info> {
+pub struct CheckAccessCallback<'info> {
     pub arcium_program: Program<'info, Arcium>,
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_CAST_VOTE))]
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_CHECK_ACCESS))]
     pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
     #[account(address = derive_mxe_pda!())]
     pub mxe_account: Account<'info, MXEAccount>,
@@ -202,44 +165,26 @@ pub struct CastVoteCallback<'info> {
     /// CHECK: instructions_sysvar
     pub instructions_sysvar: AccountInfo<'info>,
     #[account(mut)]
-    pub vote_record: Account<'info, VoteRecord>,
+    pub access_log: Account<'info, AccessLog>,
 }
 
 #[account]
 #[derive(InitSpace)]
 pub struct ProgramState {
     pub authority: Pubkey,
-    pub total_proposals: u64,
+    pub total_checks: u64,
 }
 
 #[account]
 #[derive(InitSpace)]
-pub struct Proposal {
-    pub creator: Pubkey,
-    pub proposal_id: u64,
-    #[max_len(64)]
-    pub title: String,
-    #[max_len(256)]
-    pub description: String,
-    pub num_options: u8,
-    #[max_len(8, 32)]
-    pub option_labels: [String; 8],
-    pub voting_ends_at: i64,
-    pub finalized: bool,
-    pub results: [u64; 8],
-    pub total_votes: u64,
-}
-
-#[account]
-#[derive(InitSpace)]
-pub struct VoteRecord {
-    pub voter: Pubkey,
-    pub proposal_id: u64,
-    pub voted: bool,
+pub struct AccessLog {
+    pub requester: Pubkey,
+    pub log_id: u64,
+    pub completed: bool,
 }
 
 #[event]
-pub struct VoteEvent { pub voter: Pubkey }
+pub struct AccessEvent { pub log_id: u64 }
 
 #[error_code]
 pub enum ErrorCode {

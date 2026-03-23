@@ -6,7 +6,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-shadow_vote = "A6aMv9XdGov532ahzgz8MgUMyPeW1cXCp7Ln8w5VmFvw"
+cipher_gate = "64DG39st7qGu8gGQtvQAkFAkgEFnzHa7GQiQRLUq1CyC"
 
 [registry]
 url = "https://api.apr.dev"
