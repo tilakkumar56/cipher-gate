@@ -116,7 +116,7 @@ export default function App() {
       const cipher = new RescueCipher(sharedSecret as any);
       const nonce = randomBytes(16);
 
-      const walletHash = BigInt("0x" + wallet.slice(0, 16));
+      const walletBytes = new PublicKey(wallet).toBuffer(); const walletHash = BigInt(walletBytes[0]) * BigInt(2**120) + BigInt(walletBytes[1]) * BigInt(2**112) + BigInt(walletBytes[2]) * BigInt(2**104) + BigInt(walletBytes[3]);
       const resId = BigInt(resourceId);
       const expiry = BigInt(Math.floor(Date.now() / 1000) + parseInt(expiryHours) * 3600);
       const now = BigInt(Math.floor(Date.now() / 1000));
